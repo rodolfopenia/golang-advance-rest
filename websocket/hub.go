@@ -1,6 +1,7 @@
 package websocket
 
 import (
+	"encoding/json"
 	"log"
 	"net/http"
 	"sync"
@@ -30,11 +31,58 @@ func NewHub() *Hub {
 	}
 }
 
+func (hub *Hub) Run() {
+	for {
+		select {
+		case client := <-hub.register:
+			hub.onConnect(client)
+		case client := <-hub.unregister:
+			hub.onDisconnect(client)
+		}
+	}
+}
+
+func (hub *Hub) Broadcast(message interface{}, ignore *Client) {
+	data, _ := json.Marshal(message)
+	for _, client := range hub.clients {
+		if client != ignore {
+			client.outbound <- data
+		}
+	}
+}
+
+func (hub *Hub) onConnect(client *Client) {
+	log.Println("Client Connected", client.socket.RemoteAddr())
+
+	hub.mutex.Lock()
+	defer hub.mutex.Unlock()
+	client.id = client.socket.RemoteAddr().String()
+	hub.clients = append(hub.clients, client)
+}
+
+func (hub *Hub) onDisconnect(client *Client) {
+	log.Println("Client Disconnected", client.socket.RemoteAddr())
+	client.Close()
+	hub.mutex.Lock()
+	defer hub.mutex.Unlock()
+	i := -1
+	for j, c := range hub.clients {
+		if c.id == client.id {
+			i = j
+			break
+		}
+	}
+	copy(hub.clients[i:], hub.clients[i+1:])
+	hub.clients[len(hub.clients)-1] = nil
+	hub.clients = hub.clients[:len(hub.clients)-1]
+}
+
 func (hub *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	socket, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Println(err)
-		http.Error(w, "Could not open websocket connection", http.StatusBadRequest)
+		http.Error(w, "Could not open websocket connection", http.StatusInternalServerError)
+		return
 	}
 	client := NewClient(hub, socket)
 	hub.register <- client
